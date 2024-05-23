@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+clap = { version = "4.4.2", features = ["derive", "env"] }
 dotenv = "0.15"
 openai = "1.0.0-alpha.13"
 polars = "0.32"

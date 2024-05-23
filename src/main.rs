@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Result};
+use clap::{Parser, Subcommand};
 use openai::{
   chat::{ChatCompletion, ChatCompletionMessage, ChatCompletionMessageRole},
   embeddings::{Embedding, Embeddings},
@@ -113,8 +116,8 @@ pub async fn ask(query: &str, df: &DataFrame) -> Result<String> {
 }
 
 const BATCH_SIZE: usize = 1000;
-pub async fn create_embeddings() -> Result<DataFrame> {
-  let files: Vec<String> = std::fs::read_dir("files")?
+pub async fn create_embeddings(files: &PathBuf) -> Result<DataFrame> {
+  let files: Vec<String> = std::fs::read_dir(files)?
     .into_iter()
     .filter_map(|f| f.ok())
     .map(|file| std::fs::read_to_string(file.path()).unwrap())
@@ -171,29 +174,66 @@ pub fn list_to_str(s: &Series) -> Series {
     .into_series()
 }
 
+#[derive(Debug, Parser)]
+struct Args {
+  #[command(subcommand)]
+  mode: Mode,
+  /// OpenAI API Key
+  #[arg(short, long, env)]
+  key: String
+}
+
+#[derive(Debug, Subcommand)]
+enum Mode {
+  /// Creates new embeddings DataFrame from raw txt files.
+  Embed {
+    /// Path to the Forthright documents to embed.
+    #[arg(short, long)]
+    files: PathBuf,
+    /// Path to the embeddings DataFrame csv file.
+    #[arg(long, default_value = "df.csv")]
+    df: PathBuf,
+  },
+  /// Ask the GPT to provide an answer based on generated embeddings.
+  Ask {
+    /// Path to the embeddings DataFrame csv file.
+    #[arg(long)]
+    df: PathBuf,
+    /// Question to ask the model for.
+    #[arg(short, long)]
+    question: String,
+  },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
   dotenv::dotenv()?;
-  set_key(std::env::var("OPENAI_KEY")?);
-  
-  println!("Main: Creating embeddings from files");
-  let mut df = create_embeddings().await?;
-  let writer = std::fs::File::create("df.csv")?;
-  println!("Main: Saving embeddings");
-  df.apply("embedding", list_to_str)?;
-  CsvWriter::new(writer).finish(&mut df)?;
-  
-  println!("Main: Loading embeddings");
-  let mut df = CsvReader::from_path("df.csv")?.finish()?;
 
-  println!("Main: Parsing embeddings");
-  df.apply("embedding", str_to_list)?;
+  let args = Args::parse();
+  set_key(args.key);
 
+  match args.mode {
+    Mode::Embed { files, df: df_path } => {
+      println!("Main: Creating embeddings from files");
+      let mut df = create_embeddings(&files).await?;
 
-  let question = "List in bullet form why the gaps in treatment are considered irrelevant.";
-  let response = ask(question, &df).await?;
+      println!("Main: Saving embeddings");
+      let writer = std::fs::File::create(&df_path)?;
+      df.apply("embedding", list_to_str)?;
+      CsvWriter::new(writer).finish(&mut df)?;
+    }
+    Mode::Ask { df, question } => {
+      println!("Main: Loading embeddings");
+      let mut df = CsvReader::from_path(&df)?.finish()?;
 
-  println!("Question: {question}\nResponse: {response}");
+      println!("Main: Parsing embeddings");
+      df.apply("embedding", str_to_list)?;
+
+      let response = ask(&question, &df).await?;
+
+      println!("Question: {question}\nResponse: {response}");
+    }
+  }
 
   Ok(())
 }

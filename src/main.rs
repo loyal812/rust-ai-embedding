@@ -55,8 +55,6 @@ async fn query_message(query: &str, df: &DataFrame) -> Result<String> {
   let mut message = concat!(
     "Use the below Forthright documents ",
     "to answer the subsequent question. ",
-    "If the answer cannot be found in the documents, ",
-    "write \"I could not find an answer.\""
   )
   .to_owned();
 
@@ -80,14 +78,14 @@ async fn query_message(query: &str, df: &DataFrame) -> Result<String> {
   Ok(format!("{message}\n\n{question}"))
 }
 
-pub async fn ask(query: &str, df: &DataFrame) -> Result<String> {
+pub async fn ask(query: &str, df: &DataFrame, temp: f32) -> Result<String> {
   println!("Ask: Start query building");
   let message = query_message(query, df).await?;
 
   let messages = vec![
     ChatCompletionMessage {
       role: ChatCompletionMessageRole::System,
-      content: Some("You answer questions about Forthright documents.".into()),
+      content: Some("You help in research of Forthright documents.".into()),
       name: None,
       function_call: None,
     },
@@ -101,7 +99,7 @@ pub async fn ask(query: &str, df: &DataFrame) -> Result<String> {
 
   println!("Ask: Start completion");
   let response = ChatCompletion::builder(GPT_MODEL, messages)
-    .temperature(0.)
+    .temperature(temp)
     .create()
     .await?;
 
@@ -120,26 +118,36 @@ pub async fn create_embeddings(files: &PathBuf) -> Result<DataFrame> {
   let files: Vec<String> = std::fs::read_dir(files)?
     .into_iter()
     .filter_map(Result::ok)
+    .filter(|s| s.file_type().unwrap().is_file())
     .map(|file| std::fs::read_to_string(file.path()).unwrap())
-    .map(|file| file.split("\n\n\n").map(str::to_owned).collect::<Vec<_>>())
-    .flatten()
-    .map(|file| {
-      file
-        .split("\n")
-        .filter(|s| s.len() > 64)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace("\u{a0}", " ")
-        .split("  ")
-        .filter(|s| s.len() > 64)
-        .map(str::to_owned)
-        .collect::<Vec<_>>()
+    .map(|s| {
+      s.split("\n\n")
+        .filter(|s| !s.contains("Page"))
+        .fold(vec![], |a: Vec<String>, b| {
+          let mut a = a;
+          let b = b
+            .trim()
+            .replace("\u{a0}", " ")
+            .replace("\n", " ")
+            .replace("  ", " ");
+          let b_len = b.len();
+          if a.last().map(String::len).unwrap_or_default() + b_len < 512 {
+            match a.last_mut() {
+              Some(a) => a.push_str(&b),
+              None => a.push(b),
+            }
+          } else {
+            a.push(b)
+          }
+          a
+        })
     })
     .flatten()
+    .filter(|s| s.len() > 32)
     .collect();
 
   let mut embedding = Series::new_empty("embedding", &DataType::List(Box::new(DataType::Float64)));
-
+  println!("Embed: Sending in batches of {BATCH_SIZE}");
   for batch in files
     .chunks(BATCH_SIZE)
     .into_iter()
@@ -208,6 +216,12 @@ enum Mode {
     /// Question to ask the model for.
     #[arg(short, long)]
     question: String,
+    /// What sampling temperature to use, between 0 and 2.
+    /// 
+    /// Higher values like 0.8 will make the output more random,
+    /// while lower values like 0.2 will make it more focused and deterministic.
+    #[arg(short, long, default_value = "0.2")]
+    temp: f32,
   },
 }
 
@@ -228,14 +242,14 @@ async fn main() -> Result<()> {
       df.apply("embedding", list_to_str)?;
       CsvWriter::new(writer).finish(&mut df)?;
     }
-    Mode::Ask { df, question } => {
+    Mode::Ask { df, question, temp } => {
       println!("Main: Loading embeddings");
       let mut df = CsvReader::from_path(&df)?.finish()?;
 
       println!("Main: Parsing embeddings");
       df.apply("embedding", str_to_list)?;
 
-      let response = ask(&question, &df).await?;
+      let response = ask(&question, &df, temp).await?;
 
       println!("Question: {question}\nResponse: {response}");
     }

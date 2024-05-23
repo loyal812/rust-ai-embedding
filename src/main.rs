@@ -65,7 +65,7 @@ async fn query_message(query: &str, df: &DataFrame) -> Result<String> {
   println!("Query: Building query message");
   let bpe = tiktoken_rs::cl100k_base()?;
   for text in texts {
-    let next_document = format!(r#"\n\nForthright document:\n"""\n{text}\n""""#);
+    let next_document = format!(r#"\n\nForthright document part:\n"""\n{text}\n""""#);
     if bpe
       .encode_with_special_tokens(&format!("{message}{next_document}\n\n{question}"))
       .len()
@@ -119,16 +119,23 @@ const BATCH_SIZE: usize = 1000;
 pub async fn create_embeddings(files: &PathBuf) -> Result<DataFrame> {
   let files: Vec<String> = std::fs::read_dir(files)?
     .into_iter()
-    .filter_map(|f| f.ok())
+    .filter_map(Result::ok)
     .map(|file| std::fs::read_to_string(file.path()).unwrap())
+    .map(|file| file.split("\n\n\n").map(str::to_owned).collect::<Vec<_>>())
+    .flatten()
     .map(|file| {
       file
-        .split("\n\n")
-        .map(|s| s.trim().to_owned())
+        .split("\n")
+        .filter(|s| s.len() > 64)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("\u{a0}", " ")
+        .split("  ")
+        .filter(|s| s.len() > 64)
+        .map(str::to_owned)
         .collect::<Vec<_>>()
     })
     .flatten()
-    .filter(|s| s.len() > 128)
     .collect();
 
   let mut embedding = Series::new_empty("embedding", &DataType::List(Box::new(DataType::Float64)));
@@ -138,7 +145,6 @@ pub async fn create_embeddings(files: &PathBuf) -> Result<DataFrame> {
     .into_iter()
     .map(|b| b.into_iter().map(|i| i.as_str()).collect::<Vec<_>>())
   {
-    dbg!(&batch.len());
     let embed = Embeddings::create(EMBED_MODEL, batch, "").await?;
     embed.data.into_iter().for_each(|e| {
       let new = Series::new("", vec![Series::new("", &e.vec)]);
@@ -180,7 +186,7 @@ struct Args {
   mode: Mode,
   /// OpenAI API Key
   #[arg(short, long, env)]
-  key: String
+  key: String,
 }
 
 #[derive(Debug, Subcommand)]
